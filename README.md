@@ -1,5 +1,7 @@
 # dsh-whale-pet · DSH 桌面伴侣桌宠
+
 本插件所有的一切都是由deepseek harness写的，包括这个
+
 一只住在桌面上的 **Live2D 鲸鱼娘**：透明、无边框、真正置顶的独立窗口，
 实时跟着 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 的会话状态换表情和动作，还能跟她互动。
