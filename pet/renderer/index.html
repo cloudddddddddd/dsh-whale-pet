@@ -1,0 +1,149 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+    body {
+      display: flex; flex-direction: column; align-items: center; justify-content: flex-end;
+      width: 100vw; height: 100vh;
+    }
+    #bubbles {
+      display: flex; flex-direction: column; align-items: stretch; gap: 4px;
+      width: calc(100% - 16px); margin: 8px 8px 4px;
+    }
+    #reply {
+      font: 11px/1.4 system-ui, sans-serif;
+      background: rgba(255, 255, 255, 0.96);
+      border: 1px solid rgba(0, 0, 0, 0.08);
+      border-radius: 10px;
+      padding: 5px 9px;
+      color: #1f2328;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      opacity: 0; transition: opacity 0.25s ease;
+    }
+    #reply.show { opacity: 1; }
+    .bubble {
+      --accent: #868E96;
+      position: relative;
+      background: rgba(255, 255, 255, 0.96);
+      border: 1px solid rgba(0, 0, 0, 0.08);
+      border-left: 3px solid var(--accent);
+      border-radius: 10px;
+      padding: 5px 9px 8px;
+      color: #1f2328;
+      font: 11px/1.4 system-ui, sans-serif;
+      box-sizing: border-box;
+      overflow: hidden;
+      min-width: 0; /* allow ellipsis to shrink the bubble in a flex column */
+      max-width: 100%;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+      transition: border-color 0.25s ease;
+    }
+    /* Per-state accent colours: a glance says WHAT the agent is doing. */
+    .bubble[data-state="idle"]       { --accent: #868E96; }
+    .bubble[data-state="thinking"]   { --accent: #B197FC; }
+    .bubble[data-state="waiting"]    { --accent: #FFA94D; }
+    .bubble[data-state="working"]    { --accent: #4DABF7; }
+    .bubble[data-state="reading"]    { --accent: #74C0FC; }
+    .bubble[data-state="writing"]    { --accent: #B197FC; }
+    .bubble[data-state="running"]    { --accent: #4DABF7; }
+    .bubble[data-state="searching"]  { --accent: #66D9E8; }
+    .bubble[data-state="delegating"] { --accent: #FFD43B; }
+    .bubble[data-state="planning"]   { --accent: #FFA94D; }
+    .bubble[data-state="done"]       { --accent: #51CF66; }
+    .bubble[data-state="error"]      { --accent: #FF6B6B; }
+    .bubble-title {
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      min-width: 0;
+    }
+    .bubble-title-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .bubble-dot {
+      flex: 0 0 auto;
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 5px var(--accent);
+    }
+    /* Live states pulse the dot so "busy" reads at a glance. */
+    .bubble[data-state="working"] .bubble-dot,
+    .bubble[data-state="running"] .bubble-dot,
+    .bubble[data-state="thinking"] .bubble-dot,
+    .bubble[data-state="reading"] .bubble-dot,
+    .bubble[data-state="writing"] .bubble-dot,
+    .bubble[data-state="searching"] .bubble-dot,
+    .bubble[data-state="delegating"] .bubble-dot {
+      animation: bubblePulse 1.4s ease-in-out infinite;
+    }
+    @keyframes bubblePulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.45; transform: scale(0.72); }
+    }
+    .bubble-action { color: #5c6470; opacity: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    /* Progress bar along the bubble's bottom edge: an indeterminate flowing
+       bar while the agent is busy, a full static bar when done, none when idle. */
+    .bubble-progress {
+      position: absolute;
+      left: 0; right: 0; bottom: 0;
+      height: 3px;
+      background: rgba(0, 0, 0, 0.07);
+      overflow: hidden;
+      opacity: 0;
+      transition: opacity 0.2s ease;
+    }
+    .bubble[data-state="working"] .bubble-progress,
+    .bubble[data-state="running"] .bubble-progress,
+    .bubble[data-state="thinking"] .bubble-progress,
+    .bubble[data-state="reading"] .bubble-progress,
+    .bubble[data-state="writing"] .bubble-progress,
+    .bubble[data-state="searching"] .bubble-progress,
+    .bubble[data-state="delegating"] .bubble-progress,
+    .bubble[data-state="planning"] .bubble-progress,
+    .bubble[data-state="waiting"] .bubble-progress { opacity: 1; }
+    .bubble-progress-fill {
+      height: 100%;
+      width: 34%;
+      background: var(--accent);
+      border-radius: 2px;
+      animation: bubbleFlow 1.5s ease-in-out infinite;
+    }
+    .bubble[data-state="done"] .bubble-progress { opacity: 1; }
+    .bubble[data-state="done"] .bubble-progress-fill { width: 100%; animation: none; }
+    /* A completed task's bar fades back out shortly after (handled in JS by
+       removing the state); error keeps a full red bar. */
+    .bubble[data-state="error"] .bubble-progress { opacity: 1; }
+    .bubble[data-state="error"] .bubble-progress-fill { width: 100%; animation: none; }
+    @keyframes bubbleFlow {
+      0%   { transform: translateX(-110%); }
+      100% { transform: translateX(310%); }
+    }
+    canvas { -webkit-user-select: none; }
+    /* Live2D stage sits exactly where the sprite canvas would be (same size,
+       bottom-centred), so bubbles keep their layout. pointer-events:none lets
+       drag / click / right-click fall through to #pet below it. */
+    #live2d-stage {
+      position: absolute;
+      left: 50%; bottom: 0;
+      transform: translateX(-50%);
+      pointer-events: none;
+      -webkit-user-select: none;
+    }
+    /* In Live2D mode the sprite canvas becomes an invisible click layer:
+       opacity (not display:none) so it keeps receiving mouse events. */
+    body.live2d-active #pet { opacity: 0; }
+  </style>
+</head>
+<body>
+  <div id="bubbles">
+    <div id="reply"></div>
+    <div id="session-bubbles"></div>
+  </div>
+  <canvas id="pet"></canvas>
+  <script src="./live2d-pet.js"></script>
+  <script src="./renderer.js"></script>
+</body>
+</html>

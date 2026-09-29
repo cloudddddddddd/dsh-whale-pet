@@ -1,0 +1,40 @@
+MIT License
+
+Copyright (c) 2026 Dee
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+-------------------------------------------------------------------------------
+
+This MIT license covers the CODE of this project only.
+
+It does NOT cover:
+
+  1. The Live2D model "DS鲸鱼娘" (pet/live2d/model/**)
+     Copyright held by Bilibili user 氵六青 (uid 11272072).
+     Shared for free; commercial streaming and printed merch allowed;
+     misappropriation and resale prohibited.
+     See NOTICE.md section 1 for the full statement.
+
+  2. Live2D Cubism Core (live2dcubismcore.min.js)
+     Copyright Live2D Inc. Proprietary; NOT distributed by this repository.
+     Fetched from the official CDN at first run.
+
+  3. Third-party JavaScript (pixi.js, pixi-live2d-display) --
+     those keep their own MIT licenses, see NOTICE.md section 3.

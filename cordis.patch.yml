@@ -1,0 +1,12 @@
+# dsh-whale-pet bundle patch
+#
+# 把本插件挂进 web 组合。Node half 负责：
+#   - 监听 DSH 会话事件，推导宠物状态
+#   - 在 /dsh-whale-pet/* 下提供状态 / 会话 / 互动 / 心跳端点
+#   - 按需拉起 Electron 桌宠进程
+#
+# 注意：dsh-web-search-pro 的 patch 已注入 @anweat/dsh-browser（入口 id `browser`），
+# 本文件不要重复注册任何其它插件的入口 id。
+- insert:
+    - id: dsh-whale-pet
+      name: dsh-whale-pet

@@ -1,0 +1,41 @@
+{
+  "name": "dsh-whale-pet",
+  "version": "1.0.0",
+  "description": "DSH 桌面伴侣：Live2D 鲸鱼娘桌宠 —— 透明置顶窗口、独立控制面板、会话状态联动、鼠标注视、待机随机表演与睡眠循环",
+  "type": "module",
+  "main": "lib/index.mjs",
+  "exports": {
+    ".": "./lib/index.mjs",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "files": [
+    "lib",
+    "pet",
+    "scripts",
+    "cordis.patch.yml",
+    "README.md",
+    "README.en.md",
+    "NOTICE.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "live2d",
+    "desktop-pet",
+    "鲸鱼娘"
+  ],
+  "license": "MIT"
+}

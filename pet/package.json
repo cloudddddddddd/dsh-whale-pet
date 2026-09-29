@@ -1,0 +1,13 @@
+{
+  "name": "dsh-whale-pet-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Electron shell for the dsh-whale-pet Live2D companion",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^43.4.0"
+  }
+}
