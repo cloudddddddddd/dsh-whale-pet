@@ -14,6 +14,7 @@ window.pet = {
   onCursor: (callback) => ipcRenderer.on('pet-cursor', (_event, payload) => callback(payload)),
   onHand: (callback) => ipcRenderer.on('pet-hand', (_event, payload) => callback(payload)),
   onIdleShow: (callback) => ipcRenderer.on('pet-idle-show', () => callback()),
+  onClockAlert: (callback) => ipcRenderer.on('pet-clock-alert', (_event, payload) => callback(payload)),
   onProp: (callback) => ipcRenderer.on('pet-prop', (_event, payload) => callback(payload)),
   onGaze: (callback) => ipcRenderer.on('pet-gaze', (_event, payload) => callback(payload)),
   onMotion: (callback) => ipcRenderer.on('pet-motion', (_event, payload) => callback(payload)),

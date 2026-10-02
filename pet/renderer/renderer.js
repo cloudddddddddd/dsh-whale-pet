@@ -72,6 +72,8 @@ const LIVE2D_SHEET_STUB = { complete: true, naturalWidth: 1, naturalHeight: 1 }
 
 function applyStage(next) {
   stage = Math.max(8, Math.round(next || STAGE_BASE))
+  // 计时提醒用 calc(var(--stage) + 10px) 定位，必须把实际舞台高度同步给 CSS
+  try { document.documentElement.style.setProperty('--stage', stage + 'px') } catch { /* 忽略 */ }
   canvas.style.width = `${stage}px`
   canvas.style.height = `${stage}px`
   canvas.width = Math.round(stage * DPR)
@@ -596,6 +598,52 @@ window.pet.onExpression((payload) => {
     else showReply(name ? `😊 表情：${name}` : '😊 表情：跟随状态自动切换')
   }
 })
+// ---- 计时器到点提醒：用气泡说出来，并让桌宠切到"庆祝/惊动"状态 ----
+let clockAlertShowTimer = null
+let clockAlertHideTimer = null
+const CLOCK_ALERT_MS = 5000    // 停留时长（比之前短，不长期占位）
+const CLOCK_ALERT_FADE_MS = 340 // 与 CSS transition 时长一致
+
+/** 桌宠头顶的大号提醒（蓝色、淡入淡出）。不弹独立窗口、也不再弹小气泡。 */
+function showBigClockAlert(payload) {
+  const box = document.getElementById('clockAlert')
+  const timeEl = document.getElementById('clockAlertTime')
+  const textEl = document.getElementById('clockAlertText')
+  if (!box || !timeEl || !textEl) return
+  timeEl.textContent = (payload && payload.big) || '⏰'
+  textEl.textContent = (payload && payload.sub) || ''
+
+  if (clockAlertShowTimer) clearTimeout(clockAlertShowTimer)
+  if (clockAlertHideTimer) clearTimeout(clockAlertHideTimer)
+
+  box.style.display = 'block'
+  box.classList.remove('hide')
+  // 强制一次样式重算，保证连续触发时淡入动画能重新播放
+  void box.offsetWidth
+  box.classList.add('show')
+
+  clockAlertShowTimer = setTimeout(() => {
+    box.classList.remove('show')
+    box.classList.add('hide')
+    clockAlertHideTimer = setTimeout(() => {
+      box.style.display = 'none'
+      box.classList.remove('hide')
+    }, CLOCK_ALERT_FADE_MS)
+  }, CLOCK_ALERT_MS)
+}
+
+window.pet.onClockAlert((payload) => {
+  const text = payload && typeof payload.text === 'string' ? payload.text : ''
+  if (!text) return
+  console.log('[renderer] clock alert: ' + text)
+  // 只显示大框：不再调用 showReply()，否则大框小框会同时出现
+  showBigClockAlert(payload)
+  // 到点也是个事件：让桌宠演一下，配合提醒更容易被注意到
+  transient = 'play'
+  transientUntil = Date.now() + TRANSIENT_MS
+  joyUntil = Date.now() + TRANSIENT_MS + JOY_MS
+})
+
 // ---- "random performance" button from the control panel ----
 window.pet.onIdleShow(() => {
   if (window.PetLive2D && window.PetLive2D._triggerIdleShow) {

@@ -56,6 +56,9 @@ const LEGACY_SCALE_PRESETS = [0.75, 1, 1.25, 1.5, 2]
 const BUBBLE_H = 36
 const BUBBLE_GAP = 4
 const BUBBLE_MIN_W = 210
+// 头顶给计时提醒预留的透明高度：不预留的话，没有会话气泡时舞台上方的余量
+// 只有 margin，提醒框会被窗口直接裁掉（表现为“飞起来看不见”）。
+const CLOCK_ALERT_AREA = 78
 const WEB_WIN_W = 1200
 const WEB_WIN_H = 800
 
@@ -110,7 +113,9 @@ function windowMetrics() {
   return {
     stage,
     w: Math.max(stage + margin * 2, bubbles > 0 ? BUBBLE_MIN_W : 0),
-    h: margin + bubbleArea + stage + margin,
+    // 头顶恒定预留一块透明空间给计时提醒：不预留的话，没有会话气泡时
+    // 舞台上方的余量只有 margin，提醒框会直接被窗口裁掉（看起来"飞走了"）。
+    h: margin + CLOCK_ALERT_AREA + bubbleArea + stage + margin,
   }
 }
 
@@ -365,6 +370,348 @@ function toggleGaze(menuItem) {
     // Tell the renderer to recentre when tracking is switched off.
     win.webContents.send('pet-gaze', { enabled: gazeEnabled })
   }
+}
+
+// ---- 计时器：秒表 / 计时器 / 会话 ------------------------------------------
+// 三种模式共用一套「基于绝对时间戳」的算法：所有推进都用 Date.now() 计算，
+// 不累加定时器节拍，所以即使卡顿或休眠也不会累积误差（精度到秒）。
+// 状态放在主进程，桌宠窗口与控制面板两个渲染进程都能读，避免双份计时。
+const CLOCK_MAX_SEC = 99 * 3600 // 上限 99:00:00
+
+const clock = {
+  mode: 'stopwatch', // 'stopwatch' | 'timer' | 'session'
+  // 秒表：accumulated 是已暂停累计的毫秒；base 是本段开始的时间戳
+  stopwatch: { running: false, base: 0, accumulated: 0, laps: [] },
+  // 计时器：duration 设定的总时长；endAt 结束时间戳；remaining 暂停时剩余
+  timer: { running: false, duration: 0, endAt: 0, remaining: 0 },
+  // 会话：多个时间段各自计时，跑完一轮进下一轮，可设循环次数
+  session: {
+    running: false,
+    slots: [],          // [{ label, seconds }]
+    loops: 1,           // 循环次数，0 = 无限
+    loop: 0,            // 当前第几轮（从 1 起）
+    slot: 0,            // 当前第几段（从 0 起，索引）
+    endAt: 0,           // 当前段的结束时间戳
+    remaining: 0,       // 暂停时当前段的剩余毫秒
+  },
+}
+
+let clockTickTimer = null
+let clockAlertSeq = 0
+// 上次把计时状态推给面板的时间：只要有任一时间在跑，就每秒推一次，
+// 让面板的大字自己走秒（否则只有点按钮才会刷新，等于看不见时间流逝）。
+let clockLastPushAt = 0
+
+/** 毫秒 -> 00:00:00（超过 99 小时就夹到上限） */
+function formatClock(ms) {
+  let total = Math.floor(Math.max(0, ms) / 1000)
+  const max = CLOCK_MAX_SEC
+  if (total > max) total = max
+  const h = Math.floor(total / 3600)
+  const m = Math.floor((total % 3600) / 60)
+  const s = total % 60
+  const pad = (n) => String(n).padStart(2, '0')
+  return pad(h) + ':' + pad(m) + ':' + pad(s)
+}
+
+function clockNow() { return Date.now() }
+
+/** 秒表格式：分:秒:厘秒（精度到 1/100 秒）。分钟不补 0，上限 99 小时=5940 分。 */
+function formatStopwatch(ms) {
+  let totalCs = Math.floor(Math.max(0, ms) / 10)
+  const cap = CLOCK_MAX_SEC * 100
+  if (totalCs > cap) totalCs = cap
+  const cs = totalCs % 100
+  const secs = Math.floor(totalCs / 100)
+  const s = secs % 60
+  const m = Math.floor(secs / 60)
+  const p = (n) => String(n).padStart(2, '0')
+  return String(m).padStart(2, '0') + ':' + p(s) + ':' + p(cs)
+}
+
+/** 秒表当前经过毫秒 */
+function stopwatchElapsed(now) {
+  const sw = clock.stopwatch
+  return sw.running ? sw.accumulated + (now - sw.base) : sw.accumulated
+}
+
+/** 计时器当前剩余毫秒 */
+function timerRemaining(now) {
+  const t = clock.timer
+  if (!t.running) return t.remaining
+  return Math.max(0, t.endAt - now)
+}
+
+/** 会话当前段剩余毫秒（未开始则返回全部） */
+function sessionRemaining(now) {
+  const s = clock.session
+  if (!s.running) {
+    if (s.remaining > 0) return s.remaining
+    const slot = s.slots[s.slot]
+    return slot ? slot.seconds * 1000 : 0
+  }
+  return Math.max(0, s.endAt - now)
+}
+
+/** 给桌宠气泡 + 面板推一条提醒 */
+function clockAlert(text, big, sub, accent) {
+  clockAlertSeq++
+  // 只发一次：桌宠收到后只显示头顶的大框（不再同时弹小气泡）。
+  // 之前这里有两次 send，等于同一条提醒推两遍。
+  try {
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('pet-clock-alert', {
+        text,
+        big: big || '',
+        sub: sub || text,
+        accent: accent || '#2f6feb',
+        seq: clockAlertSeq,
+        at: clockNow(),
+      })
+    }
+  } catch { /* 桌宠可能没起来 */ }
+  pushClockState()
+}
+
+/** 会话：进入第 (loop, slot) 段并设定结束时间 */
+function sessionArmSlot(now) {
+  const s = clock.session
+  const slot = s.slots[s.slot]
+  if (!slot) { s.running = false; return false }
+  s.endAt = now + slot.seconds * 1000
+  s.remaining = 0
+  return true
+}
+
+/** 会话推进到下一段；跑完所有循环就停 */
+function sessionAdvance(now) {
+  const s = clock.session
+  const finishedSlot = s.slots[s.slot]
+  clockAlert('⏱ 会话：第 ' + (s.slot + 1) + ' 段' +
+    (finishedSlot && finishedSlot.label ? '「' + finishedSlot.label + '」' : '') + ' 结束',
+    finishedSlot ? formatClock((finishedSlot.seconds || 0) * 1000) : '',
+    '第 ' + (s.slot + 1) + ' 段结束' +
+    (finishedSlot && finishedSlot.label ? '（' + finishedSlot.label + '）' : ''),
+    '#2f6feb')
+
+  s.slot++
+  if (s.slot >= s.slots.length) {
+    // 本轮结束
+    s.slot = 0
+    s.loop++
+    if (s.loops > 0 && s.loop >= s.loops) {
+      s.running = false
+      s.remaining = 0
+      clockAlert('✅ 会话全部完成（共 ' + s.loops + ' 轮）',
+        String(s.loops) + ' 轮', '会话全部完成', '#1a7f37')
+      return
+    }
+    clockAlert('🔁 进入第 ' + (s.loop + 1) + ' 轮')
+  }
+  if (!sessionArmSlot(now)) { s.running = false; return }
+  pushClockState()
+}
+
+/** 每秒（更密一点，200ms）检查一次到点事件 */
+function clockTick() {
+  const now = clockNow()
+  let dirty = false
+
+  // 秒表：只处理 99 小时上限
+  const sw = clock.stopwatch
+  if (sw.running && stopwatchElapsed(now) >= CLOCK_MAX_SEC * 1000) {
+    sw.accumulated = CLOCK_MAX_SEC * 1000
+    sw.running = false
+    clockAlert('秒表已达上限 99:00:00', '99:00:00', '秒表达到上限', '#2f6feb')
+    dirty = true
+  }
+
+  // 计时器：到点提醒（只提醒一次）
+  const t = clock.timer
+  if (t.running && now >= t.endAt) {
+    t.running = false
+    t.remaining = 0
+    clockAlert('⏰ 计时器到点：' + formatClock(t.duration * 1000),
+      formatClock(t.duration * 1000), '计时器结束', '#2f6feb')
+    dirty = true
+  }
+
+  // 会话：当前段到点则推进
+  const s = clock.session
+  if (s.running && now >= s.endAt) {
+    sessionAdvance(now)
+    dirty = true
+  }
+
+  // 有事件（到点/推进）必须立刻推；此外只要有任一时间在走，就每秒推一次，
+  // 让面板的 00:00:00 真的在走秒，而不是等用户点按钮才刷新。
+  const anyRunning =
+    clock.stopwatch.running || clock.timer.running || clock.session.running ||
+    // 暂停中也推几次，保证暂停那一刻的数值（剩余/累计）落到面板
+    (clock.stopwatch.accumulated > 0) || (clock.timer.remaining > 0) || (clock.session.remaining > 0)
+  if (dirty || (anyRunning && now - clockLastPushAt >= 900)) {
+    clockLastPushAt = now
+    pushClockState()
+  }
+}
+
+function startClockTicker() {
+  if (clockTickTimer) return
+  clockTickTimer = setInterval(() => {
+    try { clockTick() } catch (err) { console.error('[clock] tick failed:', err && err.message) }
+  }, 200)
+  if (typeof clockTickTimer.unref === 'function') clockTickTimer.unref()
+}
+
+/** 给控制面板的完整计时状态 */
+function clockState() {
+  const now = clockNow()
+  const s = clock.session
+  const slot = s.slots[s.slot]
+  return {
+    maxSec: CLOCK_MAX_SEC,
+    mode: clock.mode,
+    stopwatch: {
+      running: clock.stopwatch.running,
+      elapsed: stopwatchElapsed(now),
+      text: formatStopwatch(stopwatchElapsed(now)),
+      // 原始时间戳：面板据此在本地插值出厘秒，避免为了流畅而每秒推几十次 IPC
+      base: clock.stopwatch.base,
+      accumulated: clock.stopwatch.accumulated,
+      laps: clock.stopwatch.laps.map((l) => ({ ...l, text: formatStopwatch(l.total), lapText: formatStopwatch(l.lap) })),
+    },
+    timer: {
+      running: clock.timer.running,
+      paused: !clock.timer.running && clock.timer.remaining > 0,
+      duration: clock.timer.duration,
+      remaining: clock.timer.remaining,
+      text: formatClock(timerRemaining(now)),
+      durationText: formatClock(clock.timer.duration * 1000),
+    },
+    session: {
+      running: s.running,
+      // 明确区分"暂停中"与"已结束/未开始"：之前 UI 拿 sessionRemaining() 的
+      // 返回值判断，而它在未运行时会返回"下一段的完整时长"，于是跑完后的
+      // 会话被误判成"已暂停"，界面卡在「继续/重置」回不到设置页。
+      paused: !s.running && s.remaining > 0,
+      slots: s.slots.map((x) => ({ ...x, text: formatClock(x.seconds * 1000) })),
+      loops: s.loops,
+      loop: s.loop,
+      slot: s.slot,
+      label: slot ? (slot.label || '第 ' + (s.slot + 1) + ' 段') : '',
+      remaining: s.remaining, // 暂停时的剩余（未暂停为 0）
+      text: formatClock(sessionRemaining(now)),
+      totalLoopsText: s.loops === 0 ? '无限' : String(s.loops),
+    },
+  }
+}
+
+function pushClockState() {
+  if (!menuWin || menuWin.isDestroyed()) return
+  menuWin.webContents.send('clock-state', clockState())
+}
+
+/** 处理控制面板发来的计时命令 */
+function handleClockCommand(cmd) {
+  if (!cmd || typeof cmd !== 'object') return
+  const now = clockNow()
+  const type = String(cmd.type || '')
+  const sw = clock.stopwatch
+  const t = clock.timer
+  const s = clock.session
+  const clampSec = (n) => {
+    const v = Math.floor(Number(n) || 0)
+    if (v < 0) return 0
+    return v > CLOCK_MAX_SEC ? CLOCK_MAX_SEC : v
+  }
+
+  switch (type) {
+    // ---------------- 模式 ----------------
+    case 'mode':
+      clock.mode = cmd.mode === 'timer' || cmd.mode === 'session' ? cmd.mode : 'stopwatch'
+      break
+
+    // ---------------- 秒表 ----------------
+    case 'sw-start':
+      if (!sw.running) { sw.base = now; sw.running = true }
+      break
+    case 'sw-pause':
+      if (sw.running) { sw.accumulated = stopwatchElapsed(now); sw.running = false }
+      break
+    case 'sw-lap': {
+      const total = stopwatchElapsed(now)
+      const prev = sw.laps.length > 0 ? sw.laps[0].total : 0
+      sw.laps.unshift({ index: sw.laps.length + 1, total, lap: total - prev })
+      if (sw.laps.length > 100) sw.laps.length = 100
+      break
+    }
+    case 'sw-reset':
+      sw.running = false; sw.base = 0; sw.accumulated = 0; sw.laps = []
+      break
+    case 'sw-clear-laps':
+      sw.laps = []
+      break
+
+    // ---------------- 计时器 ----------------
+    case 'tm-set':
+      if (!t.running) t.remaining = clampSec(cmd.seconds) * 1000
+      t.duration = clampSec(cmd.seconds)
+      break
+    case 'tm-start': {
+      const secs = clampSec(cmd.seconds !== undefined ? cmd.seconds : t.duration)
+      if (secs <= 0) break
+      t.duration = secs
+      t.endAt = now + secs * 1000
+      t.remaining = 0
+      t.running = true
+      break
+    }
+    case 'tm-pause':
+      if (t.running) { t.remaining = Math.max(0, t.endAt - now); t.running = false }
+      break
+    case 'tm-resume':
+      if (!t.running && t.remaining > 0) { t.endAt = now + t.remaining; t.running = true }
+      break
+    case 'tm-reset':
+      t.running = false; t.endAt = 0; t.remaining = 0
+      break
+
+    // ---------------- 会话 ----------------
+    case 'ss-set-slots': {
+      if (s.running) break
+      const list = Array.isArray(cmd.slots) ? cmd.slots : []
+      s.slots = list.slice(0, 20).map((x, i) => ({
+        label: typeof x.label === 'string' && x.label ? x.label.slice(0, 24) : '第 ' + (i + 1) + ' 段',
+        seconds: clampSec(x.seconds),
+      })).filter((x) => x.seconds > 0)
+      s.slot = 0; s.loop = 0; s.remaining = 0
+      break
+    }
+    case 'ss-set-loops':
+      s.loops = Math.max(0, Math.min(999, Math.floor(Number(cmd.loops) || 0)))
+      break
+    case 'ss-start':
+      if (s.slots.length === 0) break
+      s.loop = 0; s.slot = 0; s.running = true
+      if (!sessionArmSlot(now)) { s.running = false; break }
+      clockAlert('▶️ 会话开始：共 ' + s.slots.length + ' 段，' +
+        (s.loops === 0 ? '无限循环' : s.loops + ' 轮'))
+      break
+    case 'ss-pause':
+      if (s.running) { s.remaining = Math.max(0, s.endAt - now); s.running = false }
+      break
+    case 'ss-resume':
+      if (!s.running && s.remaining > 0 && s.slots.length > 0) {
+        s.endAt = now + s.remaining; s.running = true; s.remaining = 0
+      }
+      break
+    case 'ss-reset':
+      s.running = false; s.loop = 0; s.slot = 0; s.endAt = 0; s.remaining = 0
+      break
+    default:
+      break
+  }
+  pushClockState()
 }
 
 /** Push the live state to the control panel so it re-renders. */
@@ -738,6 +1085,7 @@ ipcMain.handle('menu-data', () => {
     handExpressions: HAND_EXPRESSIONS.filter((n) => all.includes(n)),
     propExpressions: PROP_EXPRESSIONS.filter((n) => all.includes(n)),
     scales: SCALE_PRESETS,
+    clock: clockState(),
     state: {
       mood: currentLook.mood,
       motion: currentLook.motion,
@@ -748,6 +1096,12 @@ ipcMain.handle('menu-data', () => {
       scale,
     },
   }
+})
+
+ipcMain.handle('clock-state', () => clockState())
+
+ipcMain.on('clock-cmd', (_event, cmd) => {
+  try { handleClockCommand(cmd) } catch (err) { console.error('[clock] command failed:', err && err.message) }
 })
 
 ipcMain.on('menu-close', () => {
@@ -995,6 +1349,11 @@ const interactTestFlag = process.argv.includes('--interact-test')
 app.whenReady().then(() => {
   createWindow()
   createTray() // system tray: the app's home (taskbar-free)
+  startClockTicker() // 计时器：200ms 检查一次到点事件
+
+
+
+
 
 
 
@@ -1045,7 +1404,10 @@ app.whenReady().then(() => {
   }
 })
 
-app.on('before-quit', () => { isQuitting = true; pokePresence(false) })
+app.on('before-quit', () => {
+  isQuitting = true
+  pokePresence(false)
+})
 // Tray-owned lifecycle: closing the pet window hides it (see win.on('close'));
 // the app only truly exits from the tray menu, so never quit on window-all-closed.
 app.on('window-all-closed', () => { /* stay in the tray */ })
