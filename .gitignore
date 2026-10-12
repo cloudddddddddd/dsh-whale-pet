@@ -1,0 +1,22 @@
+# ---- 运行时依赖（首次由 scripts/ensure-runtime.mjs 安装）----
+node_modules/
+pet/node_modules/
+
+# ---- 首次运行时从官方 CDN 获取的专有运行时 ----
+# Live2D Cubism Core 版权归 Live2D Inc.，不随本仓库分发
+pet/live2d/vendor/live2dcubismcore.min.js
+
+# ---- 生成物 / 调试产物 ----
+pet/*.png
+pet/*.log
+docs/*.png
+*.local
+.DS_Store
+Thumbs.db
+
+# ---- 备份 / 临时文件（不要上传）----
+*.bak
+*.bak-*
+*.old
+*.tmp
+*~
