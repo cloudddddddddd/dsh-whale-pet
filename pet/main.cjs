@@ -41,8 +41,12 @@ const SESSIONS_URL = `${BASE}/dsh-whale-pet/sessions`
 const PRESENCE_URL = `${BASE}/dsh-whale-pet/presence`
 const INTERACT_URL = `${BASE}/dsh-whale-pet/interact`
 // dsh web launcher facts (same values the one-click VBS launcher uses).
+// Fallbacks only: the plugin's /runtime-info endpoint is consulted first, so an
+// upgraded dsh runtime does not need this file edited again.
 const NODE_EXE = 'C:\\Program Files\\nodejs\\node.exe'
-const DSH_BIN = 'C:\\Users\\clouddddd\\AppData\\Local\\npm-cache\\_npx\\1e7f6d9597241db0\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js'
+const DSH_BIN = 'C:\\Users\\clouddddd\\dsh-pet-runtime\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js'
+const DSH_BIN_LEGACY = 'C:\\Users\\clouddddd\\AppData\\Local\\npm-cache\\_npx\\1e7f6d9597241db0\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js'
+const DSH_HOME_DIR = 'C:\\Users\\clouddddd\\.dsh-pet-020'
 const PNPM_DIR = 'F:\\文档\\文档\\deepseek work\\.tooling\\pnpm'
 const POLL_MS = 1500
 const HEARTBEAT_MS = 15000
@@ -123,6 +127,36 @@ async function fetchJSON(url) {
   const res = await fetch(url, { signal: AbortSignal.timeout(3000) })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   return res.json()
+}
+
+/** Web GUI URL to load in the embedded window / open in the browser.
+ *  dsh 0.2+ fences the GUI behind a per-process launch token, which the plugin
+ *  hands out at /dsh-whale-pet/web-url; rc.6 simply returns the plain base URL. */
+let cachedWebUrl = null
+async function resolveWebUrl() {
+  try {
+    const res = await fetch(`${BASE}/dsh-whale-pet/web-url`, { signal: AbortSignal.timeout(3000) })
+    if (res.ok) {
+      const body = await res.json()
+      if (body && typeof body.url === 'string' && body.url) { cachedWebUrl = body.url; return cachedWebUrl }
+    }
+  } catch { /* older plugin without the endpoint */ }
+  cachedWebUrl = BASE
+  return BASE
+}
+
+/** Where does dsh itself live? Cached while the backend is up, because the
+ *  endpoint is unreachable exactly when we need it (right after a restart). */
+let lastRuntimeInfo = null
+async function fetchRuntimeInfo() {
+  try {
+    const res = await fetch(`${BASE}/dsh-whale-pet/runtime-info`, { signal: AbortSignal.timeout(3000) })
+    if (res.ok) {
+      const body = await res.json()
+      if (body && typeof body.dshBin === 'string' && body.dshBin) { lastRuntimeInfo = body; return body }
+    }
+  } catch { /* fall back to the constants */ }
+  return null
 }
 
 // NOTE: the sprite sheet manifest is gone. The pet is rendered with Live2D
@@ -225,7 +259,7 @@ function ensureWebWin() {
       backgroundThrottling: false, // keep painting while hidden (web-shot capture)
     },
   })
-  webWin.loadURL(BASE)
+  resolveWebUrl().then((url) => { if (webWin && !webWin.isDestroyed()) webWin.loadURL(url) })
   // External links (e.g. the plugin marketplace's "GitHub 原链" button, which
   // uses target="_blank") must open in the SYSTEM default browser, not in a
   // new Electron window. Every popup/new-window request is handed to
@@ -270,9 +304,10 @@ function togglePetWindow() {
   else { win.show(); win.focus() }
 }
 
-/** Open the DSH web GUI in the system default browser (one click from the tray). */
-function openInBrowser() {
-  shell.openExternal(BASE)
+/** Open the DSH web GUI in the system default browser (one click from the tray).
+ *  Uses the token URL, otherwise dsh 0.2+ answers 401. */
+async function openInBrowser() {
+  shell.openExternal(await resolveWebUrl())
 }
 
 /** Local copy of the awesome-dsh-plugins directory (plugin catalog). */
@@ -919,8 +954,14 @@ function findListenerPid(netstatOut, port) {
 
 /** Launch dsh web hidden (no console window), like the VBS one-click launcher. */
 function launchDshWeb() {
+  // Prefer what the running backend reported about itself (survives upgrades).
+  const info = lastRuntimeInfo
+  const nodeExe = info && typeof info.nodeExe === 'string' && info.nodeExe ? info.nodeExe : NODE_EXE
+  const dshBin = info && typeof info.dshBin === 'string' && info.dshBin ? info.dshBin : DSH_BIN
+  const dshArgs = info && Array.isArray(info.dshArgs) && info.dshArgs.length > 0 ? info.dshArgs : ['--profile', 'web']
   const env = { ...process.env, PATH: `${PNPM_DIR};${process.env.PATH || ''}` }
-  const child = spawn(NODE_EXE, [DSH_BIN, '--profile', 'web'], {
+  env.DSH_HOME = (info && typeof info.dshHome === 'string' && info.dshHome) || env.DSH_HOME || DSH_HOME_DIR
+  const child = spawn(nodeExe, [dshBin, ...dshArgs], {
     cwd: __dirname,
     env,
     detached: true,
@@ -932,7 +973,10 @@ function launchDshWeb() {
   const waitUp = (tries) => {
     if (tries <= 0) return
     fetch(STATE_URL, { signal: AbortSignal.timeout(2000) })
-      .then((r) => { if (r.ok && webWin && !webWin.isDestroyed()) webWin.loadURL(BASE) })
+      .then((r) => {
+        if (!r.ok || !webWin || webWin.isDestroyed()) return
+        resolveWebUrl().then((url) => { if (webWin && !webWin.isDestroyed()) webWin.loadURL(url) })
+      })
       .catch(() => setTimeout(() => waitUp(tries - 1), 1000))
   }
   waitUp(20)
@@ -1361,6 +1405,8 @@ app.whenReady().then(() => {
 
 
   heartbeatLoop()
+  resolveWebUrl() // warm the token URL cache for the embedded window
+  fetchRuntimeInfo() // remember where this dsh lives, for the restart path
   pollLoop()
   if (win) {
     win.webContents.on('did-finish-load', () => {

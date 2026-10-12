@@ -104,6 +104,27 @@
 
 ---
 
+## 运行环境
+
+| 项目 | 要求 |
+|---|---|
+| **dsh** | **0.2.0-rc.2**（当前开发与验证的版本）；同时兼容 **0.1.0-rc.6**（回滚路径）|
+| Node.js | >= 22 |
+| Electron | 由 `scripts/ensure-runtime.mjs` 自动安装 |
+| 平台 | Windows（置顶窗口使用 `screen-saver` 层级，是 Windows 上唯一真正生效的写法）|
+
+### 两个 dsh 版本的关键差异（插件已同时适配）
+
+| | 0.1.0-rc.6 | 0.2.0-rc.2 |
+|---|---|---|
+| Web GUI 鉴权 | 无栅栏，根路径直接可访问 | **有鉴权栅栏**，裸访问返回 401，必须用 `?token=...` 换取 cookie |
+| 凭证文件 | 平铺 `KEY: value` | 嵌套 `version: 1` + `refs:` |
+| 插件 peer 检查 | 无 | **有**，不匹配会被静默跳过并打印 `skipping profile bundle` |
+
+插件用 `GET /dsh-whale-pet/web-url` 统一给出可用地址：0.2.0 下带 token，
+| `GET /dsh-whale-pet/runtime-info` | `{ nodeExe, dshBin, dshHome, webUrl, ... }` —— 让桌宠无需硬编码运行时路径 |
+rc.6 下自动退回普通地址（`ctx.get('connection')` 不存在时降级）。
+
 ## 安装
 
 ### 1. 装插件

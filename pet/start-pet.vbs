@@ -1,24 +1,37 @@
 ' ============================================================
-'  dsh-whale-pet one-click launcher (windowless, self-contained)
+'  dsh-whale-pet one-click launcher (dsh 0.2.0-rc.2 stack)
 '  1) starts dsh web hidden (if http://127.0.0.1:3080 is down)
 '  2) waits until it responds
 '  3) starts the desktop pet (if not already running)
 '  No console windows at any point; pet lives in the system tray.
+'  Rollback: run start-pet-rc6.vbs (dsh 0.1.0-rc.6 + %USERPROFILE%\.dsh-pet)
 ' ============================================================
 Option Explicit
 
 Const URL      = "http://127.0.0.1:3080"
-Const DSH_BIN  = "C:\Users\clouddddd\AppData\Local\npm-cache\_npx\1e7f6d9597241db0\node_modules\@deepseek-ai\dsh\lib\bin.js"
+Const DSH_BIN  = "C:\Users\clouddddd\dsh-pet-runtime\node_modules\@deepseek-ai\dsh\lib\bin.js"
 Const NODE_EXE = "C:\Program Files\nodejs\node.exe"
 Const PET_EXE  = "C:\Users\clouddddd\dsh-whale-pet\pet\node_modules\electron\dist\electron.exe"
 Const PET_DIR  = "C:\Users\clouddddd\dsh-whale-pet\pet"
 Const PNPM_DIR = "F:\文档\文档\deepseek work\.tooling\pnpm"
 
+' Isolated DSH home for this stack. The rc.6 stack keeps .dsh-pet, the separate
+' DeepSeek Harness desktop app keeps %USERPROFILE%\.dsh; the three never share state.
+Const DSH_HOME_DIR = "C:\Users\clouddddd\.dsh-pet-020"
+
 Dim shell
 Set shell = CreateObject("WScript.Shell")
 
+' A shell hosted inside another Electron app (the DSH desktop app's own terminal)
+' exports ELECTRON_RUN_AS_NODE=1. Inherited by our children it turns electron.exe
+' into plain Node and the pet window dies instantly, so drop it for this process tree.
+On Error Resume Next
+shell.Environment("PROCESS").Remove("ELECTRON_RUN_AS_NODE")
+On Error GoTo 0
+
 ' pnpm must be on PATH for dsh web's plugin boot
 shell.Environment("PROCESS")("PATH") = PNPM_DIR & ";" & shell.Environment("PROCESS")("PATH")
+shell.Environment("PROCESS")("DSH_HOME") = DSH_HOME_DIR
 
 ' ---- helper: is the DSH web up? ----
 Function IsUp(u)
@@ -28,7 +41,7 @@ Function IsUp(u)
   x.open "GET", u, False
   x.setTimeouts 2000, 2000, 2000, 2000
   x.send
-  IsUp = (x.status = 200)
+  IsUp = (x.status = 200) Or (x.status = 401)
   On Error GoTo 0
 End Function
 
@@ -36,13 +49,13 @@ End Function
 If IsUp(URL) Then
   ' already running, nothing to do
 Else
-  ' Start hidden. We launch node.exe DIRECTLY (no cmd /c wrapper):
-  ' WScript.Shell.Run parses the quoted paths itself, so the space in
-  ' "C:\Program Files\nodejs\node.exe" is safe — cmd /c would strip the
-  ' leading quotes and split the path at the space. WorkingDirectory is set
-  ' so the harness boots from a valid cwd. Window style 0 = fully hidden.
+  ' Start hidden. node.exe is launched DIRECTLY (no cmd /c wrapper): WScript.Shell.Run
+  ' parses quoted paths itself, while cmd /c would strip the quotes and split on the
+  ' space in "C:\Program Files\nodejs\node.exe". Window style 0 = fully hidden.
+  ' --no-open keeps dsh 0.2 from popping the system browser on every boot; the pet's
+  ' own window is the GUI.
   shell.CurrentDirectory = PET_DIR
-  shell.Run """" & NODE_EXE & """ """ & DSH_BIN & """ --profile web", 0, False
+  shell.Run """" & NODE_EXE & """ """ & DSH_BIN & """ --profile web --port 3080 --no-open", 0, False
 End If
 
 ' ---- 2) wait up to 60s ----

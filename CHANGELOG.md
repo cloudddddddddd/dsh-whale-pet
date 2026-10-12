@@ -9,6 +9,52 @@
 
 ---
 
+## [1.2.0] — 2026-10-12
+
+适配 **dsh 0.2.0-rc.2**（本机桌宠后端从 0.1.0-rc.6 升级）。
+
+### 新增
+
+- `GET /dsh-whale-pet/web-url`：返回带一次性鉴权 token 的 Web GUI 地址。dsh 0.2+ 的 Web 服务带鉴权栅栏，
+  裸访问根路径返回 401，必须用 `?token=...` 换取 cookie；rc.6 没有这道栅栏，则返回普通地址。
+- `GET /dsh-whale-pet/runtime-info`：回报 node 可执行文件、dsh 入口、`DSH_HOME`、进程参数与 PID，
+  让 Electron 侧重启后端时不必硬编码运行时路径。
+
+### 变更
+
+- 内嵌 DSH 网页窗口（以及「在浏览器打开」）改用 `/web-url` 给出的带 token 地址。
+- `restartDshWeb` 采用 `/runtime-info` 回报的运行时；启动后端时显式传入 `DSH_HOME`。
+- 拉起桌宠进程时删除继承来的 `ELECTRON_RUN_AS_NODE`：该变量会让 `electron.exe` 以纯 Node 运行，
+  桌宠秒退并报 `Cannot read properties of undefined (reading 'requestSingleInstanceLock')`。
+- `pet/start-pet.vbs`：指向独立的 0.2.0-rc.2 运行时与 `.dsh-pet-020`，加 `--no-open`，
+  探活把 401 也视为「后端已启动」，并清理 `ELECTRON_RUN_AS_NODE`。
+- 新增 `pet/start-pet-rc6.vbs`：一键回滚到 rc.6 + `.dsh-pet` 的启动入口。
+
+### 兼容性
+
+- 同时兼容 dsh 0.1.0-rc.6（回滚路径）与 0.2.0-rc.2：新增端点对旧版是纯增量，
+  `ctx.get('connection')` 在旧版返回 undefined 时退回不带 token 的地址。
+
+### 修复
+
+**桌宠头顶的会话气泡消失**
+
+- **现象**：桌宠在跑任务时头顶不再出现会话气泡（`GET /dsh-whale-pet/sessions` 返回空数组）。
+- **根因**：早先为处理"气泡堆积"加了一个会话过滤函数，判定条件是"拿不到明确的活跃证据就不显示"
+  （`isActiveSession()`）。但 DSH 的会话对象实际结构是 `{ id, title, activity, since }`
+  （见上游 whale-girl 的 `src/sessions.mjs`），**并没有** `status` / `running` / `active` / `endedAt`
+  这些字段 —— 过滤条件全部落空，于是**所有会话都被判为不活跃而过滤掉了**。
+- **处理**：不再对会话字段做任何猜测。防堆积只保留一条判据：**插件自身没有活动时就不返回气泡**
+  （空闲时 `activityName()` 为空），跑任务时必然有活动，因此一定出气泡，且最多 3 个。
+  同时删除了那个会导致误杀的过滤函数。
+
+**气泡文案不再永远是"正在干活…"**
+
+- **现象**：气泡里显示不出具体工具名。
+- **根因**：`currentTool` 变量只在两处被读取，**从未被赋值**。
+- **处理**：在 `session/event` 里补上 `tool/call` 分支取出工具名（如 `pwsh`），
+  回合结束（`turn/end`）时清空，气泡因此能显示「执行 pwsh 工具」。
+
 ## [1.1.0] — 2026-10-02
 
 本次更新新增了**计时器**（含三种模式），并修掉了若干交互与显示问题。
