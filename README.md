@@ -94,6 +94,17 @@
 - 所有推进都用 `Date.now()` 计算，**不累加定时器节拍**，所以卡顿或系统休眠都不会累积误差。
 - 到点提醒 = **桌宠气泡** + 桌宠演一段（比只有气泡更容易注意到）。
 
+### 重启 DSH 的行为
+
+控制面板的「重启 DSH」**只替换后端，桌宠本身不退出**：
+
+1. 杀掉占用 3080 的进程（**只杀该进程，绝不用 `/T`**，避免牵连整棵进程树）；
+2. 把重启交给 `pet/start-pet.vbs`（分离运行）。该脚本是幂等的 ——
+   3080 没在跑就起后端、等到响应，**并且发现桌宠不在时把它补起来**；
+3. 等后端**真正的 HTTP 服务**就绪（不是只看端口监听）后，重新加载内嵌网页窗口。
+
+跑起来后，全过程记录在 `pet/dsh-restart.log`，出问题可直接查看。
+
 ### DSH 集成
 | 功能 | 说明 |
 |---|---|
@@ -123,6 +134,8 @@
 
 插件用 `GET /dsh-whale-pet/web-url` 统一给出可用地址：0.2.0 下带 token，
 | `GET /dsh-whale-pet/runtime-info` | `{ nodeExe, dshBin, dshHome, webUrl, ... }` —— 让桌宠无需硬编码运行时路径 |
+| `GET /dsh-whale-pet/emoji-settings` | `{ ok, settings, revision }` —— 读 dsh-emoji 设置（可选桥接 API）|
+| `POST /dsh-whale-pet/emoji-settings` | 浅合并写回 dsh-emoji 设置（可选桥接 API）|
 rc.6 下自动退回普通地址（`ctx.get('connection')` 不存在时降级）。
 
 ## 安装
@@ -225,6 +238,18 @@ dsh-whale-pet/
 ```
 
 ---
+
+## 测试
+
+会话气泡的语义有可复现的回归测试（纯 Node，不需要启动 dsh 或 Electron）：
+
+```bash
+node tests/bubbles.test.mjs
+```
+
+它用一个 mock ctx 加载 `lib/index.mjs`，直接投递 `session/event` 并检查
+`/dsh-whale-pet/sessions` 的输出，覆盖「只报正在跑的会话」「回合结束气泡消失」
+「重放的历史事件不产生气泡」等 10 项断言。
 
 ## 调试
 

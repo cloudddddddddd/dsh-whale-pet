@@ -9,6 +9,9 @@ window.menuAPI = {
   cmd: (command) => ipcRenderer.send('menu-cmd', command),
   /** State pushes so the panel stays in sync. */
   onState: (callback) => ipcRenderer.on('menu-state', (_event, state) => callback(state)),
+  /** 重启 DSH 的进度推送（working / busy / reconnected / failed） */
+  onRestart: (callback) => ipcRenderer.on('restart-state', (_event, payload) => callback(payload)),
+
   /** 读取完整计时状态 */
   clockState: () => ipcRenderer.invoke('clock-state'),
   /** 发送计时命令（开始/暂停/取时/重置/设置…） */

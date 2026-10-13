@@ -34,6 +34,10 @@ const fs = require('node:fs')
 const path = require('node:path')
 const { execFile, spawn } = require('node:child_process')
 
+// stdio guards: 被父进程带走或管道断开时，一次写日志不应该把整个进程弄崩
+try { process.stdout.on('error', () => {}) } catch { /* 忽略 */ }
+try { process.stderr.on('error', () => {}) } catch { /* 忽略 */ }
+
 const BASE_ARG = process.argv.find((arg) => arg.startsWith('--base-url='))
 const BASE = BASE_ARG ? BASE_ARG.slice('--base-url='.length) : 'http://127.0.0.1:3080'
 const STATE_URL = `${BASE}/dsh-whale-pet/state`
@@ -924,23 +928,79 @@ function motionMenuItems() {
  * --profile web). The pet window is a separate Electron process and keeps
  * running; its poll loop reconnects once the service is back up.
  */
+let restarting = false
+
+/** 把重启进度告诉控制面板（面板据此显示"重启中…"，避免用户狂点） */
+function notifyRestart(phase) {
+  try {
+    if (menuWin && !menuWin.isDestroyed()) menuWin.webContents.send('restart-state', { phase })
+  } catch { /* 面板没开就算了 */ }
+}
+
 function restartDshWeb() {
+  // 设计目标：只换后端，桌宠自己必须活着。
+  //
+  // 前几版都在纠结"怎么杀"，但真正的坑是【谁在执行】：桌宠是后端（node）的
+  // 子进程（插件 autoStart 从后端里 spawn 出来的），它在前台 taskkill 掉自己的
+  // 父进程，父进程一没，它自己也就跟着没了 —— 日志每次都断在 taskkill 回调之前，
+  // 正是这个原因，而不是 taskkill 参数的问题。
+  //
+  // 现在改成：本进程只负责"杀"；"拉起来"交给 start-pet.vbs。该脚本分离运行
+  // （detached + 无管道），所以即使桌宠真的没了，它也一定会把后端起回来，
+  // 并在发现桌宠不在时把它补起来 —— 这就是"保留桌宠、只重启后端"的实现方式。
+  if (restarting) { logRestart('ignored: a restart is already in progress'); notifyRestart('busy'); return }
+  restarting = true
+  notifyRestart('working')
+  logRestart('--- restart requested ---')
+  // 看门狗：万一中途出岔子，也要把按钮恢复可用，别卡在"重启中…"
+  setTimeout(() => { if (restarting) { restarting = false; notifyRestart('failed'); logRestart('watchdog: reset restarting flag') } }, 90000)
+
   execFile('netstat', ['-ano'], { windowsHide: true }, (err, stdout) => {
-    if (err) return
+    if (err) { logRestart('netstat failed: ' + err.message); restarting = false; notifyRestart('failed'); return }
     const pid = findListenerPid(stdout, 3080)
-    if (pid) {
-      try { process.kill(pid) } catch { /* already gone */ }
-    }
-    // Wait for the port to free, then relaunch.
-    const waitUntilFree = (tries) => {
-      if (tries <= 0) { launchDshWeb(); return }
-      execFile('netstat', ['-ano'], { windowsHide: true }, (err2, out2) => {
-        if (findListenerPid(out2, 3080) === null) { launchDshWeb(); return }
-        setTimeout(() => waitUntilFree(tries - 1), 300)
-      })
-    }
-    waitUntilFree(10)
+    logRestart('listener pid on :3080 = ' + pid)
+    const handOff = () => { launchViaLauncher(); reconnectWebWindow(60) }
+    if (!pid) { logRestart('nothing listening, handing off to launcher'); handOff(); return }
+    // 只杀这一个进程，绝不用 /T（/T 会牵连整棵进程树）
+    logRestart('killing pid ' + pid + ' (no /T)')
+    execFile('taskkill', ['/PID', String(pid), '/F'], { windowsHide: true }, (e2, out2) => {
+      logRestart('taskkill -> ' + (e2 ? 'err ' + e2.message : String(out2).trim()))
+      handOff()
+    })
   })
+}
+
+/**
+ * 用 start-pet.vbs 拉起后端。它是幂等的：3080 已在跑就不重复起，
+ * 桌宠没跑就顺手补起来。分离运行，不占用本进程的管道，因此不会随本进程一起死。
+ */
+function launchViaLauncher() {
+  const vbs = path.join(__dirname, 'start-pet.vbs')
+  if (!fs.existsSync(vbs)) {
+    logRestart('start-pet.vbs not found, falling back to direct spawn')
+    launchDshWeb(0)
+    return
+  }
+  try {
+    const child = spawn('wscript.exe', ['//B', vbs], {
+      cwd: __dirname,
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    })
+    child.on('error', (e) => logRestart('launcher spawn error: ' + (e && e.message)))
+    child.unref()
+    logRestart('handed off to start-pet.vbs (detached)')
+  } catch (e) {
+    logRestart('launcher spawn threw: ' + (e && e.message))
+    launchDshWeb(0)
+  }
+}
+/** 把重启过程写进 pet/dsh-restart.log，便于查“为什么没起来” */
+function logRestart(msg) {
+  const line = '[' + new Date().toISOString() + '] ' + msg + '\n'
+  try { fs.appendFileSync(path.join(__dirname, 'dsh-restart.log'), line) } catch { /* 忽略 */ }
+  console.log('[dsh-restart] ' + msg)
 }
 
 /** Extract the PID listening on a TCP port from `netstat -ano` output. */
@@ -953,7 +1013,7 @@ function findListenerPid(netstatOut, port) {
 }
 
 /** Launch dsh web hidden (no console window), like the VBS one-click launcher. */
-function launchDshWeb() {
+function launchDshWeb(attempt = 0) {
   // Prefer what the running backend reported about itself (survives upgrades).
   const info = lastRuntimeInfo
   const nodeExe = info && typeof info.nodeExe === 'string' && info.nodeExe ? info.nodeExe : NODE_EXE
@@ -968,18 +1028,79 @@ function launchDshWeb() {
     stdio: 'ignore',
     windowsHide: true,
   })
+  child.on('error', (e) => logRestart('spawn error: ' + (e && e.message)))
   child.unref()
-  // Reconnect the embedded web window to the fresh instance once it is up.
-  const waitUp = (tries) => {
-    if (tries <= 0) return
-    fetch(STATE_URL, { signal: AbortSignal.timeout(2000) })
-      .then((r) => {
-        if (!r.ok || !webWin || webWin.isDestroyed()) return
-        resolveWebUrl().then((url) => { if (webWin && !webWin.isDestroyed()) webWin.loadURL(url) })
-      })
-      .catch(() => setTimeout(() => waitUp(tries - 1), 1000))
+  logRestart('spawned pid=' + child.pid + ' attempt=' + attempt)
+
+  // 启动后验证：等不到端口就再试一次，两次都不行才放弃（并留日志）
+  let ticks = 0
+  const verify = () => {
+    ticks++
+    execFile('netstat', ['-ano'], { windowsHide: true }, (_e, out) => {
+      if (findListenerPid(out, 3080) !== null) {
+        logRestart('backend is up (after ' + ticks + ' checks)')
+        notifyRestart('reconnected')
+        reconnectWebWindow(20)
+        return
+      }
+      if (ticks >= 25) { // ≈10s
+        logRestart('backend did NOT come up after ' + ticks + ' checks')
+        if (attempt < 1) { logRestart('retrying launch…'); launchDshWeb(attempt + 1); return }
+        notifyRestart('failed')
+        restarting = false
+        return
+      }
+      setTimeout(verify, 400)
+    })
   }
-  waitUp(20)
+  setTimeout(verify, 600)
+}
+
+/** 后端起来后，把内嵌网页窗口重新指向它（带 token 的新地址） */
+/** 内嵌网页加载失败时的自愈：退避重试，避免留下白屏 */
+function recoverWebWindow(attempt = 0) {
+  if (attempt > 5) { logRestart('web window recovery gave up'); return }
+  const delay = 1000 * (attempt + 1)
+  setTimeout(() => {
+    if (!webWin || webWin.isDestroyed()) return
+    logRestart('recovering web window, attempt ' + (attempt + 1))
+    resolveWebUrl()
+      .then((url) => { if (url && webWin && !webWin.isDestroyed()) webWin.loadURL(url) })
+      .catch(() => recoverWebWindow(attempt + 1))
+  }, delay)
+}
+
+function reconnectWebWindow(tries) {
+  if (tries <= 0) { logRestart('giving up reconnecting web window'); return }
+  if (!webWin || webWin.isDestroyed()) return
+  // 关键：netstat 看到端口监听 ≠ HTTP 服务已就绪。之前的实现一看到端口就立刻
+  // loadURL，后端还在初始化，结果就是一片白屏。这里先用一个真实 HTTP 请求探活，
+  // 拿到 200 才切换页面；否则退避重试。
+  fetch(STATE_URL, { signal: AbortSignal.timeout(2500) })
+    .then((r) => {
+      if (!r.ok) throw new Error('HTTP ' + r.status)
+      logRestart('http ready, reloading embedded web window')
+      return resolveWebUrl()
+    })
+    .then((url) => {
+      if (webWin && !webWin.isDestroyed() && url) {
+        // 切页后监听真实加载结果：失败（含 ERR_CONNECTION_REFUSED、
+        // 或 0 长度文档被判为白屏）就自动走恢复流程，而不是把白屏留给用户。
+        const onFail = (_e, code, desc, validatedURL) => {
+          logRestart('web window load failed: ' + code + ' ' + desc + ' ' + String(validatedURL || '').slice(0, 60))
+          webWin && webWin.webContents.removeListener('did-fail-load', onFail)
+          recoverWebWindow(0)
+        }
+        try { webWin.webContents.once('did-fail-load', onFail) } catch { /* 忽略 */ }
+        logRestart('loading url into web window')
+        webWin.loadURL(url)
+      }
+      restarting = false
+    })
+    .catch((e) => {
+      logRestart('web not ready yet (' + (e && e.message) + '), retry in 800ms')
+      setTimeout(() => reconnectWebWindow(tries - 1), 800)
+    })
 }
 
 /** Reveal the pet window and bring it forward (used by tray click). */

@@ -9,6 +9,177 @@
 
 ---
 
+## [1.3.0] — 2026-10-13
+
+本次把「重启 DSH」按钮**真正修好**（前一次修复没生效）、修掉重启后的白屏，
+以及会话气泡的「假气泡」问题；同时处理了 pnpm 虚拟存储故障、新增表情包设置桥接端点、移除 gal-view。
+
+### 修复 · 「重启 DSH」按钮（前一次修复为什么没用）
+
+前一版在调「**怎么杀**」——去掉 `/T`、延长端口等待、加 HTTP 就绪校验。
+但真正的坑在「**谁在执行杀**」。
+
+**根因**（由进程树实测确认）：
+
+```
+3080 监听者: node.exe          ← DSH 后端
+    └── electron.exe            ← 桌宠是后端的【子进程】
+```
+
+桌宠是插件 `autoStart` 从后端里 spawn 出来的**子进程**。而这个按钮做的事是
+`taskkill /PID <后端> /F` —— 等于**桌宠在杀自己的父进程**。父进程一没，它自己也跟着消失；
+而"把后端起回来"的代码正好就在桌宠进程里，于是表现为：**点了之后整个退出，也不会自动拉起**。
+
+证据：`pet/dsh-restart.log` **每次都断在 `killing pid ...` 之后、`taskkill` 回调之前** ——
+连回调都没跑到，进程就已经没了。
+
+**处理（架构调整：本进程只负责「杀」，「拉起来」交给分离运行的启动器）**
+
+- `restartDshWeb()` 重写：只杀 3080 上的那一个进程（**绝不带 `/T`**），随后把重启交给
+  `pet/start-pet.vbs`（`detached: true` + `stdio: 'ignore'` + `unref()`）。
+- **为什么选 VBS**：它本来就是**幂等 + 自愈**的启动器 —— 3080 没在跑就起后端 → 等到响应 →
+  **发现 electron 不在跑就把它补起来**。由于它与本进程完全分离，
+  **即使桌宠真的被带走，它也会把两端都恢复**。
+- 插件侧 `startPet()`：`detached: false` → **`detached: true`**，让桌宠成为独立进程，
+  从源头消除这个父子关系（在下次后端启动时生效）。
+- **移除** `waitPortFree()` 与 `/T` 兜底：等待与端口争夺交给启动器，避免误伤进程树。
+- 新增 **90 秒看门狗**：中途异常时按钮也会从「重启中…」恢复可用。
+- 新增 `process.stdout` / `process.stderr` 的 `error` 护栏：管道断开不再导致进程崩溃。
+
+### 修复 · 跑任务时头顶冒出三个气泡
+
+- **现象**：执行任务时桌宠头顶同时出现 **3 个会话气泡**，而实际只有一个会话在跑。
+- **根因**：这是**过度修正**。之前为解决「一个气泡都不出」，把会话过滤**整个去掉了**，
+  改成盲信 `ctx.get("sessions").list()` —— 而它会返回**全部**会话（含历史与已结束的）。
+  于是列表里每个会话都分到一颗气泡，撞上 3 颗的上限，就成了「永远三颗」。
+- **两次都错在「猜」**：更早那版是猜字段过滤（把气泡全滤光），这一版是完全不过滤（冒出三颗）。
+- **处理（照上游 whale-girl 的语义，不再猜字段）**：用 `session/event` 自己维护**每会话活动账本**：
+
+  | 事件 | 活动 |
+  |---|---|
+  | `turn/start` | `thinking` |
+  | `tool/call` | `tool:<工具名>` |
+  | `turn/end` 且 `reason.kind` 为 `blocked` | `waiting`（等待批准，气泡保留）|
+  | `turn/end` 其它 | `done` → **不出气泡** |
+  | `session/title` | 写入气泡标题 |
+
+  只有「账本里活动不为 `done`」的会话才会出现在 `/sessions` 里，最多 3 个。
+  回合一结束活动即变 `done`，气泡自然消失 —— 全程不需要猜任何字段。
+  账本另设上限（24 个会话）与过期时间（30 分钟无动静即遗忘），避免无限增长。
+- **验证**：用真实插件代码驱动会话事件，8 项断言全通过 ——
+  其中最关键的一条是「**列表里给 3 个会话、只有 1 个真的在跑 → 只出 1 颗气泡**」，
+  另含「回合结束气泡消失」「blocked 转 waiting 保留」「5 个并发最多 3 颗」。
+
+### 修复 · 仍然出现的「假气泡」（DSH 会重放历史会话事件）
+
+- **现象**：改用会话账本之后**仍有假气泡** —— 一个 **9 月创建的老会话**也被记为「正在跑 pwsh」。
+- **取证**：连续 20 秒观察会话文件，老会话 **0 字节增长、时间戳不动**（确实没在跑），
+  而当前会话增长 +133 字节；但 `/sessions` 依旧把两者都报出来。
+- **根因**：**DSH 在恢复会话时会把历史事件重放一遍**，同样走 `session/event`。
+  账本把这条重放事件当成实时活动记了进去 —— 于是几个月前的老会话凭空多出一颗气泡。
+- **处理**（两道防线）：
+  1. **重放过滤**：事件自带 `time`（epoch ms），比现在早 2 分钟以上的一律当历史丢弃，
+     并只对每个会话提示一次 `ignored replayed events for …`；
+  2. **新鲜度兜底**：120 秒内没再收到该会话任何事件的，不再算「在跑」
+     —— 防止 `time` 缺失时，重放事件以「刚刚收到」的姿态混进账本。
+- **验证**：仓库内新增可复现测试 `tests/bubbles.test.mjs`（运行 `node tests/bubbles.test.mjs`），
+  **10 项断言全部通过**，含「重放 90 天前的事件 → 不产生气泡」
+  与「缺 `time` 的实时事件照常接受」（不能因为字段缺失把真气泡也漏掉）。
+
+### 修复 · 重启后内嵌网页一片白
+
+- **根因**：用 `netstat` 判断"后端起来了"，但**端口监听 ≠ HTTP 服务就绪**。
+  日志实测：端口一通就立刻 `loadURL`，两者相隔仅 **16 毫秒**，后端还在初始化，于是白屏。
+- **处理**：切页前先用**真实 HTTP 请求**探活（拿到 200 才切换，否则 800ms 退避重试）；
+  切页后再挂 `did-fail-load` 监听，加载失败自动走 `recoverWebWindow()` 重试。
+
+### 新增 · 重启体验
+
+- 控制面板的按钮在重启期间显示「**重启中…**」。
+- **防重复点击**：重启进行中再次点击会被忽略并回 `busy` 状态
+  （此前日志显示曾连点 5 次，后端被反复杀/起，主观上就"特别久"）。
+- 全过程写入 `pet/dsh-restart.log`，每个环节都有记录，便于定位。
+
+### 修复 · 工程卫生
+
+- 清除升级工具遗留的中间产物（`pet/main.cjs.patched.cjs`、`lib/index.mjs.patched.mjs`）。
+- `.gitignore` 增补 `*.patched.*`。
+- 移除误提交的运行日志。
+
+### 修复 · pnpm 虚拟存储不一致（`ERR_PNPM_UNEXPECTED_VIRTUAL_STORE`）
+
+- **现象**：`dsh plugin add/remove` 全部失败，报依赖仍从旧 home 的 `.pnpm` 链接，
+  而 pnpm 想用当前 home 的虚拟存储。
+- **根因**：环境隔离时把 `.dsh` 复制为 `.dsh-pet-020`，但依赖与锁文件仍记录着**旧 home 的虚拟存储位置**。
+- **处理**：在 `profiles/web/pnpm-workspace.yaml` 里显式指定
+  `virtualStoreDir: C:\Users\clouddddd\.dsh\profiles\web\node_modules\.pnpm`，让两边对齐。
+  （pnpm 11 读 `pnpm-workspace.yaml`；`.npmrc` 里的 `virtual-store-dir` 它不认。）
+
+### 新增 · 表情包设置桥接端点（可选）
+
+- `GET  /dsh-whale-pet/emoji-settings` —— 读 `dsh-emoji` 命名空间的设置与 revision
+- `POST /dsh-whale-pet/emoji-settings` —— 浅合并后写回（读-改-写，带 revision）
+
+实现用 dsh 官方 settings 服务（用法取自 `dsh-emoji` 自己的服务端代码）：
+
+```js
+ctx.get('settings').describe({ redactSecrets: true })        // 读：找 entry.ns === 'dsh-emoji'
+await ctx.get('settings').replace('dsh-emoji', next, rev)   // 写
+```
+
+> 这是**通用 API**，供任何想读写表情包设置的消费者使用。
+> 桌宠控制面板**没有**使用它 —— 表情包设置改由 dsh 自己的设置页承载（见下）。
+
+### 修复 · 表情包尺寸改不动（"Host 拒绝了无效的设置请求"）
+
+- **现象**：在设置里改表情包尺寸，报「Host 拒绝了无效的设置请求」。
+- **根因**：`/emoji-settings` 读取时只保留了 4 个字段（`mode` / `displaySize` /
+  `activePack` / `customPrompt`），**漏掉了 `packRevision`**；写回时把这个"不完整的对象"
+  整体提交，而服务端 `parseEmojiSettings()` 要求五个字段**一个不少**，
+  于是整份校验失败、写入被拒。
+- **处理**：
+  - 读取改为**原样保留全部字段**（读回来是什么就存什么）；
+  - 写入以完整对象为底再合并白名单字段，并对 `customPrompt` / `packRevision` 做兜底补齐；
+  - `packRevision` **不列入可改字段**（它由 dsh-emoji 自己维护，这里只透传/兜底）。
+- **验证**：用 mock 复刻服务端校验（含新增的 `colossal` 档），
+  `GET` 能读到 `packRevision`，`POST colossal/huge/giant` 全部 200 且 `packRevision` 保持不变。
+### 移除
+
+- 卸载 `gal-view` 插件（其客户端 bundle 达 5.6 MB，且与桌宠功能重叠）。
+
+### 相关（不在本插件内）
+
+**`dsh-emoji` 尺寸档位已扩充**（脚本 `dsh-upgrade/patch-emoji-sizes.mjs`，幂等、可 `--revert`）
+
+原档位只到 `xlarge` = 2.5em，不够用。已新增两档：
+
+| 档位 | em 值 | 相对 xlarge |
+|---|---|---|
+| `huge` | 4em | 1.6 倍 |
+| **`giant`** | **6.5em** | **2.6 倍** |
+
+尺寸链路与改动点（两端都有校验，必须同时改，否则写入被服务端拒绝）：
+
+```
+EMOJI_DISPLAY_SIZES      枚举校验（client.js + index.js 各一份）
+  -> EMOJI_DISPLAY_SIZE_EM   em 值表
+  -> emojiCss()              注入 <style> 的 width/height
+```
+
+另外 locale 也补了 `size.huge` / `size.giant`（中英文各一份），否则设置页会显示成 key。
+
+**dsh-emoji 的设置卡片位置也已改回「设置 → 插件」**
+（脚本 `dsh-upgrade/patch-emoji-settings-slot.mjs`）。
+0.3.6 把它从 `settings.plugins.tab` 挪到了 `plugins.bundle.config`（侧栏「插件」页面），
+脚本把它改回设置页。
+
+
+`dsh-emoji` 0.3.6 把设置卡片从「设置 → 插件」页面挪到了侧栏「插件」页面
+（slot 由 `settings.plugins.tab` 改为 `plugins.bundle.config`）。
+如需让它回到设置页，使用脚本 `dsh-upgrade/patch-emoji-settings-slot.mjs`（幂等，可 --revert）。
+
+---
+
 ## [1.2.0] — 2026-10-12
 
 适配 **dsh 0.2.0-rc.2**（本机桌宠后端从 0.1.0-rc.6 升级）。

@@ -533,6 +533,17 @@ function clockUiSignature(st) {
 }
 let lastClockSignature = null
 
+// 重启进度：面板据此显示"重启中…"，避免用户以为没生效而反复点
+let RESTART_PHASE = null
+api.onRestart((payload) => {
+  RESTART_PHASE = payload && payload.phase ? payload.phase : null
+  if (RESTART_PHASE === 'reconnected') {
+    // 后端已就绪并重连，稍等片刻复位按钮
+    setTimeout(() => { RESTART_PHASE = null; if (activeTab === 'system') renderContent() }, 1500)
+  }
+  if (activeTab === 'system') renderContent()
+})
+
 api.onState((state) => {
   STATE = Object.assign({}, STATE, state)
   updateStatus()
